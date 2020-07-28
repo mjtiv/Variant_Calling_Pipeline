@@ -1,0 +1,155 @@
+#!/bin/bash
+#PBS -S /bin/sh  ###Tells UNIX shell to be executed
+#PBS -N FE_Muscle_Round_II ###Name of the job
+#PBS -l nodes=1:ppn=16 ###Setting the number of nodes and CPUs=ppn
+#PBS -t 1-23
+#PBS -e /home/mjtiv/towork/Chicken_Projects/Feed_Efficiency_Project/Muscle/$PBS_JOBID.stderr
+#PBS -o /home/mjtiv/towork/Chicken_Projects/Feed_Efficiency_Project/Muscle/$PBS_JOBID.stdout
+
+############Variables to Change for each run#####################################################
+
+#Current working directory of the data
+current_work_directory=/work/mjtiv/Chicken_Projects/Feed_Efficiency_Project/Muscle
+
+#Sample_Overhang for sequencing
+overhang=74  ###See Inventory_WB_FE file (number = (read length - 1)  - Step 1 - 2nd Pass of STAR
+
+number_of_Threads=16 #GATK allows for number of threads to utilized to speed up analysis process (Picard---no variable allowed to change) -Step 1 ONLY
+sample_platform=illumina #What platform was the sequencing data analyzed on
+
+study=FE_Muscle
+
+round_of_pipeline=Round_II_Repeat  #Tell the difference between unmasked versus masked for RNA-Seq pipeline
+
+###########Pathway to the Reference Genome####### May Change in Some programs
+original_genome_directory=/home/mjtiv/Gallus_gallus_5_BioMix_Version/masked_genome_build
+
+directory_that_contains_genome=masked_genome_build
+
+reference_Genome_Fasta=masked_Gallus_gallus.Gallus_gallus-5.0.dna.toplevel.fa
+
+#################################Pathways for Programs####################################################
+#Pipeline was orignally developed by https://software.broadinstitute.org/gatk/guide/article?id=3891
+#Modifications of original pipeline for the lab were developed by Weixuan Fu
+#Final updated pipeline and universal annotated code were developed by M. Joseph Tomlinson IV
+
+export PATH=/usr/local/samtools:$PATH ###updated
+export PATH=/home/mjtiv/software/STAR/STAR-2.5.2b/bin/Linux_x86_64_static:$PATH   ###Updated
+GATK_Pathway=/home/mjtiv/software/GATK/GATK_3.7 #Updated to latest version
+picard=/home/mjtiv/software/PICARD/PICARD_2.8.1/picard.jar
+
+#########################Find Samples Automatically using JOB Array ###################################################
+#This scripts reads through a directory of files labeled "sample_1, sample_2, sample_3...", and runs
+#all the fastqc files in that directory, the program also reads a text file labeled with the true sample name
+
+cd $current_work_directory/"Sample_"$PBS_ARRAYID
+
+Seq_Results=$current_work_directory/"Sample_"$PBS_ARRAYID
+
+echo $current_work_directory/"Sample_"$PBS_ARRAYID
+
+#All global variables are put into arrays for simplicity purposes, especially since there are numerous fastq files
+declare -g forward_Primer  #Variable to create an array of the forward primer fastq files
+declare -g reverse_Primer  #Variable to create an array of the reverse primer fastq files
+declare -g sample_name #Variable for the true sample Name
+
+#Code sorts through a directory and pulls out the fastq files and sample name file
+for file in *; do
+	if [[ $file == *R2_001.fastq.gz ]]; then 
+		reverse_Primer[${#reverse_Primer[@]}+1]=$(echo "$file");
+	elif [[ $file == *R1_001.fastq.gz ]]; then 
+		forward_Primer[${#forward_Primer[@]}+1]=$(echo "$file");
+	elif [[ $file == *.txt ]]; then
+ 		Sample=${file%.txt}
+		#Sample_Name[${#Sample_Name[@]}+1]=$(echo "$Sample");
+		sample_name=$(echo "$Sample");
+	else
+		echo "not file type"
+	fi
+done
+
+#Step Converts the arrays to a list of samples seperated by commas NOT white space
+#This step is required when submitting multiple files to STAR
+reverse_Primer_List=$(IFS=,; echo "${reverse_Primer[*]}")
+forward_Primer_List=$(IFS=,; echo "${forward_Primer[*]}")
+
+#Testing the Return of the Sample Lists
+echo "Testing Variable List"
+echo $reverse_Primer_List
+echo $forward_Primer_List
+echo $forward_Primer_List $reverse_Primer_List
+
+echo $sample_name
+
+
+
+###############################STARTING Pipeline Run#######################################################################
+mkdir $current_work_directory/$study"_VCF_Files_"$round_of_pipeline
+
+#Output for all the results based on the current working directory
+STAR_results_out=$current_work_directory/$study"_VCF_Files_"$round_of_pipeline
+
+
+#########################STEP 1 of GATK Pipeline###########################################################################
+#In this step all the intermediate directories for the GATK Pipeline (largely STAR alignment) are created first. 
+mkdir $STAR_results_out/$sample_name"_out" 
+mkdir $STAR_results_out/$sample_name"_out"/genome_1_Pass
+mkdir $STAR_results_out/$sample_name"_out"/genome_2nd_Pass
+mkdir $STAR_results_out/$sample_name"_out_2nd_pass"
+mkdir $STAR_results_out/$sample_name"_Stats_on_Run"
+
+#####################################Bottle Neck in Pipeline############################################################
+#A big bottleneck in the entire pipeline is there being only one copy of the reference genome (slows everything down)
+#To adddress this issue a local copy of the genome will be created in the sample folder for the run
+
+cp -r $original_genome_directory $STAR_results_out/$sample_name"_out"
+
+#Creating the new genome_directory for the rest of the program to reference
+genome_directory=$STAR_results_out/$sample_name"_out"/$directory_that_contains_genome
+
+
+####################################Starting GATK Pipeline Commands########################################################
+####First Pass of the chicken genome using sequencing results (Workflow 1.2). Note in the third pass of STAR added the
+#the standard --outFilterMultimapNmax 10, which means the loci reads are only allowed to map to this many loci (default setting)
+
+
+cd $Seq_Results
+STAR --genomeDir $genome_directory --readFilesIn $forward_Primer_List $reverse_Primer_List --readFilesCommand zcat --runThreadN $number_of_Threads --outFilterMultimapNmax 10 \
+--outFileNamePrefix $STAR_results_out/$sample_name"_out"/genome_1_Pass/
+
+###2nd Pass of the STAR, using splice junction information ---file created in the prior step (Workflow Step 1.3)
+#cd $STAR_results_out/$sample_name"_out"/genome_2nd_Pass
+cd $STAR_results_out/$sample_name"_out"/genome_1_Pass
+STAR --runMode genomeGenerate --genomeDir $STAR_results_out/$sample_name"_out"/genome_2nd_Pass --genomeFastaFiles \
+$genome_directory/$reference_Genome_Fasta --sjdbFileChrStartEnd $STAR_results_out/$sample_name"_out"/genome_1_Pass/SJ.out.tab \
+--sjdbOverhang $overhang --runThreadN $number_of_Threads
+
+###Resulting index is then used to produce the final alignments using the original RNA-Seq data again (Workflow Step 1.4)
+cd $Seq_Results
+#cd $STAR_results_out/$sample_name"_out"/genome_2nd_Pass
+STAR --genomeDir $STAR_results_out/$sample_name"_out"/genome_2nd_Pass --readFilesIn $forward_Primer_List $reverse_Primer_List --readFilesCommand zcat \
+--runThreadN $number_of_Threads --outFilterMultimapNmax 10 --outFileNamePrefix $STAR_results_out/$sample_name"_out_2nd_pass"/
+
+#Copies the final output of the alignment, which is a sam file and moves it to the sample directory
+cp $STAR_results_out/$sample_name"_out_2nd_pass"/Aligned.out.sam $STAR_results_out/$sample_name"_aligned_out.sam"
+
+#Copying all important STATS file from output to somewhere for reference before running cleanup step
+mv $STAR_results_out/$sample_name"_out"/genome_1_Pass/Log.final.out $STAR_results_out/$sample_name"_Stats_on_Run"/Step_1_Sample_1_Pass_Log.final.out
+mv $STAR_results_out/$sample_name"_out"/genome_1_Pass/Log.progress.out $STAR_results_out/$sample_name"_Stats_on_Run"/Step_1_Sample_1_Pass_Log.progress.out
+mv $STAR_results_out/$sample_name"_out_2nd_pass"/Log.final.out $STAR_results_out/$sample_name"_Stats_on_Run"/Step_1_Sample_2nd_Pass_Log.final.out
+mv $STAR_results_out/$sample_name"_out_2nd_pass"/Log.progress.out $STAR_results_out/$sample_name"_Stats_on_Run"/Step_1_Sample_2nd_Pass_Log.progress.out
+
+#Clean_Up_Stage_of_Step_1_to_Limit_Space_Usage
+#rm -rf $STAR_results_out/$sample_name"_out"
+#rm -rf $STAR_results_out/$sample_name"_out_2nd_pass"
+
+#QC Step of the final file produced from STAR
+samtools flagstat $STAR_results_out/$sample_name"_aligned_out.sam" > $STAR_results_out/$sample_name"_Stats_on_Run"/"Step_1_Final"_$sample_name"_sorted_sam_stats".txt
+
+echo "Step_1 " $sample_name " of the pipeline end"
+
+#End of Step 1 of the GATK Pipeline
+#################################################################################################################################################################
+##############################################################################################################################################################
+
+

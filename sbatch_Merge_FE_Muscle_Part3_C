@@ -1,0 +1,95 @@
+#!/bin/bash
+#SBATCH --job-name=Merging_FE_Breast_Muscle
+#SBATCH --ntasks=8
+#SBATCH --mem=32000
+
+echo "Hello world, I am running!"
+
+#######################Parameters to Change#######################################################
+#Remember to change error output file locations and job name
+pathway=/mnt/chicken/mjtiv/Chicken_Projects/Combining_VCF_Files_Round_II_Repeat/Breast_Muscle
+
+outputfile_name=/mnt/chicken/mjtiv/Chicken_Projects/Combining_VCF_Files_Round_II_Repeat/Breast_Muscle/Outfiles/Feed_Efficiency_Samples_Only/Feed_Efficiency_Breast_Muscle_10-13-2017.g.vcf
+
+
+#########################Retrieve_List_of_Samples###################################################
+#Its easy to move all vcf files to one directory and write a UNIX code that retrieves file names
+#and combines everything together in a way that is accepted by GATK example input "--variant sample1.g.vcf"
+#This is done by retrieving the file name variables and when adding to the array add in the "--varant" variable too
+
+cd $pathway
+
+#All global variables are put into arrays for simplicity purposes, especially since there are numerous vcf files
+declare -g vcf_file_array  #Variable to create an array of the vcf files
+declare -g vcf_file_index  #Variable to create an array of the index files
+
+#Code sorts through a directory and pulls out the fastq files and sample name file
+for file in *; do
+	if [[ $file == FE_M*.vcf ]]; then 
+		vcf_file_array[${#vcf_file_array[@]}+1]=$(echo "--variant " "$file"); ###Retrieves the file name and also combines in proper GATK annotation
+	elif [[ $file == FE_M*.idx ]]; then 
+		vcf_file_index[${#vcf_file_index[@]}+1]=$(echo "$file");
+	else
+		echo "$file" ###Testing code reads through directory correctly
+	fi
+done
+
+#Prints the array  of vcf files as a variable that is recongized for GATK input
+vcf_file_list=$(echo "${vcf_file_array[*]}")
+
+#Testing the Return of the Sample Lists
+echo "Testing VCF File List"
+echo $vcf_file_list
+
+
+#################################Pathways for Programs####################################################
+#Pipeline was orignally developed by https://software.broadinstitute.org/gatk/guide/article?id=3891
+#Modifications of original pipeline for the lab were developed by Weixuan Fu
+#Final updated pipeline and universal annotated code were developed by M. Joseph Tomlinson IV
+
+export PATH=/usr/local/samtools:$PATH ###updated
+export PATH=/home/mjtiv/software/STAR/STAR-2.5.2b/bin/Linux_x86_64_static:$PATH   ###Updated
+GATK_Pathway=/home/mjtiv/software/GATK/GATK_3.7 #Updated to latest version
+picard=/home/mjtiv/software/PICARD/PICARD_2.8.1/picard.jar
+
+#Pathway to the Reference Genome
+genome_directory=/home/mjtiv/Gallus_gallus_5_BioMix_Version/unmasked_genome_build
+
+###GATK Tool GenotypeGVCF https://software.broadinstitute.org/gatk/documentation/tooldocs/current/org_broadinstitute_gatk_tools_walkers_variantutils_GenotypeGVCFs.php
+#Parameters changed from standard from code--- Parameter stand_call_conf (increased Phred score from 10 to 20)
+#Note the original -stand_emit_conf 20.0 was deprecated in GATK 3.7, so no longer needed
+
+java -jar $GATK_Pathway/GenomeAnalysisTK.jar -T GenotypeGVCFs \
+-R $genome_directory/Gallus_gallus.Gallus_gallus-5.0.dna.toplevel.fa \
+$vcf_file_list \
+-D $genome_directory/sorted_Gallus_gallus.vcf \
+-stand_call_conf 20.0 \
+-o $outputfile_name \
+--disable_auto_index_creation_and_locking_when_reading_rods
+
+
+cd /mnt/chicken/mjtiv/Chicken_Projects/Combining_VCF_Files_Round_II_Repeat/Breast_Muscle/Outfiles/Feed_Efficiency_Samples_Only/
+
+
+#Next step is Variant Filitration of the produced data
+#window - the window size in bases of clustered SNPs --- default setting 35 --- changed to 15
+#cluster - allowable number of SNPs per cluster 
+#filterName - naming of the filter for dataset
+
+################JEXL Command filters############################################
+#filters being utilized are JEXL commands in quotes " " (Java EXpression Language) https://software.broadinstitute.org/gatk/guide/article?id=1255
+#filter FS stands for FisherStrand --- the recommended value is either 60/30 pipeline using 30 https://software.broadinstitute.org/gatk/guide/article?id=6925 
+#filter QD stands for Qual By Depth (QD = 2.0) is recommended value
+#filter DP stands for depth of coverage  ---variable added in
+
+java -jar $GATK_Pathway/GenomeAnalysisTK.jar -T VariantFiltration \
+-R $genome_directory/Gallus_gallus.Gallus_gallus-5.0.dna.toplevel.fa \
+-window 15 \
+-cluster 3 \
+-filterName FS -filter "FS > 30.0" \
+-filterName QD -filter "QD < 2.0" \
+-filterName DP --filterExpression "DP < 100" \
+-V Feed_Efficiency_Breast_Muscle_10-13-2017.g.vcf \
+-o Filtered_Feed_Efficiency_Breast_Muscle_10-13-2017.g.vcf \
+--disable_auto_index_creation_and_locking_when_reading_rods
+

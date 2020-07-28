@@ -1,0 +1,13 @@
+#!/bin/bash
+#PBS -S /bin/sh  ###Tells UNIX shell to be executed
+#PBS -N masking_Genome ###Name of the job
+#PBS -l nodes=1:ppn=16 ###Setting the number of nodes and CPUs=ppn
+#PBS -e /home/mjtiv/towork/Chicken_Projects/Creating_Masked_Genome/$PBS_JOBID.stderr
+#PBS -o /home/mjtiv/towork/Chicken_Projects/Creating_Masked_Genome/$PBS_JOBID.stdout
+
+bedtools=/home/mjtiv/software/BEDTOOLS/BEDTOOLS_2.26.0/bedtools2/bin/bedtools
+
+cd /work/mjtiv/Chicken_Projects/Creating_Masked_Genome
+
+bedtools maskfasta -fi Gallus_gallus.Gallus_gallus-5.0.dna.toplevel.fa -bed Filtered_Combined_2-19-2017.g.vcf -fo masked_Gallus_gallus.Gallus_gallus-5.0.dna.toplevel.fa
+

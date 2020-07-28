@@ -1,0 +1,321 @@
+#!/bin/bash
+#PBS -S /bin/sh  ###Tells UNIX shell to be executed
+#PBS -N FE_Muscle ###Name of the job
+#PBS -l nodes=1:ppn=16 ###Setting the number of nodes and CPUs=ppn
+#PBS -t 1-23
+#PBS -e /home/mjtiv/towork/Chicken_Projects/Feed_Efficiency_Project/Muscle/$PBS_JOBID.stderr
+#PBS -o /home/mjtiv/towork/Chicken_Projects/Feed_Efficiency_Project/Muscle/$PBS_JOBID.stdout
+
+############Variables to Change for each run#####################################################
+
+#Current working directory of the data
+current_work_directory=/work/mjtiv/Chicken_Projects/Feed_Efficiency_Project/Muscle
+#Sample_Overhang for sequencing
+overhang=74  ###See Inventory_WB_FE file (number = (read length - 1)  - Step 1 - 2nd Pass of STAR
+
+number_of_Threads=16 #GATK allows for number of threads to utilized to speed up analysis process (Picard---no variable allowed to change) -Step 1 ONLY
+sample_platform=illumina #What platform was the sequencing data analyzed on
+
+study=FE_Muscle
+
+#################################Pathways for Programs####################################################
+#Pipeline was orignally developed by https://software.broadinstitute.org/gatk/guide/article?id=3891
+#Modifications of original pipeline for the lab were developed by Weixuan Fu
+#Final updated pipeline and universal annotated code were developed by M. Joseph Tomlinson IV
+
+export PATH=/usr/local/samtools:$PATH ###updated
+export PATH=/home/mjtiv/software/STAR/STAR-2.5.2b/bin/Linux_x86_64_static:$PATH   ###Updated
+GATK_Pathway=/home/mjtiv/software/GATK/GATK_3.7 #Updated to latest version
+picard=/home/mjtiv/software/PICARD/PICARD_2.8.1/picard.jar
+
+#Pathway to the Reference Genome
+genome_directory=/home/mjtiv/Gallus_gallus_5_BioMix_Version/unmasked_genome_build
+
+
+#########################Find Samples Automatically using JOB Array ###################################################
+#This scripts reads through a directory of files labeled "sample_1, sample_2, sample_3...", and runs
+#all the fastqc files in that directory, the program also reads a text file labeled with the true sample name
+
+cd $current_work_directory/"Sample_"$PBS_ARRAYID
+
+Seq_Results=$current_work_directory/"Sample_"$PBS_ARRAYID
+
+echo $current_work_directory/"Sample_"$PBS_ARRAYID
+
+#All global variables are put into arrays for simplicity purposes, especially since there are numerous fastq files
+declare -g forward_Primer  #Variable to create an array of the forward primer fastq files
+declare -g reverse_Primer  #Variable to create an array of the reverse primer fastq files
+declare -g sample_name #Variable for the true sample Name
+
+#Code sorts through a directory and pulls out the fastq files and sample name file
+for file in *; do
+	if [[ $file == *R2_001.fastq.gz ]]; then 
+		reverse_Primer[${#reverse_Primer[@]}+1]=$(echo "$file");
+	elif [[ $file == *R1_001.fastq.gz ]]; then 
+		forward_Primer[${#forward_Primer[@]}+1]=$(echo "$file");
+	elif [[ $file == *.txt ]]; then
+ 		Sample=${file%.txt}
+		#Sample_Name[${#Sample_Name[@]}+1]=$(echo "$Sample");
+		sample_name=$(echo "$Sample");
+	else
+		echo "not file type"
+	fi
+done
+
+#Step Converts the arrays to a list of samples seperated by commas NOT white space
+#This step is required when submitting multiple files to STAR
+reverse_Primer_List=$(IFS=,; echo "${reverse_Primer[*]}")
+forward_Primer_List=$(IFS=,; echo "${forward_Primer[*]}")
+
+#Testing the Return of the Sample Lists
+echo "Testing Variable List"
+echo $reverse_Primer_List
+echo $forward_Primer_List
+echo $forward_Primer_List $reverse_Primer_List
+
+echo $sample_name
+
+
+
+###############################STARTING Pipeline Run#######################################################################
+mkdir $current_work_directory/$study"_VCF_Files"
+
+#Output for all the results based on the current working directory
+STAR_results_out=$current_work_directory/$study"_VCF_Files"
+
+#########################STEP 1 of GATK Pipeline###########################################################################
+#In this step all the intermediate directories for the GATK Pipeline (largely STAR alignment) are created first. 
+mkdir $STAR_results_out/$sample_name"_out" 
+mkdir $STAR_results_out/$sample_name"_out"/genome_1_Pass
+mkdir $STAR_results_out/$sample_name"_out"/genome_2nd_Pass
+mkdir $STAR_results_out/$sample_name"_out_2nd_pass"
+mkdir $STAR_results_out/$sample_name"_Stats_on_Run"
+
+#####################################Bottle Neck in Pipeline############################################################
+#A big bottleneck in the entire pipeline is there being only one copy of the reference genome (slows everything down)
+#To adddress this issue a local copy of the genome will be created in the sample folder for the run
+
+cp -r /home/mjtiv/Gallus_gallus_5_BioMix_Version/unmasked_genome_build $STAR_results_out/$sample_name"_out"
+
+#Creating the new genome_directory for the rest of the program to reference
+genome_directory=$STAR_results_out/$sample_name"_out"/unmasked_genome_build
+
+
+####################################Starting GATK Pipeline Commands########################################################
+####First Pass of the chicken genome using sequencing results (Workflow 1.2). Note in the third pass of STAR added the
+#the standard --outFilterMultimapNmax 10, which means the loci reads are only allowed to map to this many loci (default setting)
+
+
+cd $Seq_Results
+STAR --genomeDir $genome_directory --readFilesIn $forward_Primer_List $reverse_Primer_List --readFilesCommand zcat --runThreadN $number_of_Threads --outFilterMultimapNmax 10 \
+--outFileNamePrefix $STAR_results_out/$sample_name"_out"/genome_1_Pass/
+
+###2nd Pass of the STAR, using splice junction information ---file created in the prior step (Workflow Step 1.3)
+#cd $STAR_results_out/$sample_name"_out"/genome_2nd_Pass
+cd $STAR_results_out/$sample_name"_out"/genome_1_Pass
+STAR --runMode genomeGenerate --genomeDir $STAR_results_out/$sample_name"_out"/genome_2nd_Pass --genomeFastaFiles \
+$genome_directory/Gallus_gallus.Gallus_gallus-5.0.dna.toplevel.fa --sjdbFileChrStartEnd $STAR_results_out/$sample_name"_out"/genome_1_Pass/SJ.out.tab \
+--sjdbOverhang $overhang --runThreadN $number_of_Threads
+
+###Resulting index is then used to produce the final alignments using the original RNA-Seq data again (Workflow Step 1.4)
+cd $Seq_Results
+#cd $STAR_results_out/$sample_name"_out"/genome_2nd_Pass
+STAR --genomeDir $STAR_results_out/$sample_name"_out"/genome_2nd_Pass --readFilesIn $forward_Primer_List $reverse_Primer_List --readFilesCommand zcat \
+--runThreadN $number_of_Threads --outFilterMultimapNmax 10 --outFileNamePrefix $STAR_results_out/$sample_name"_out_2nd_pass"/
+
+#Copies the final output of the alignment, which is a sam file and moves it to the sample directory
+cp $STAR_results_out/$sample_name"_out_2nd_pass"/Aligned.out.sam $STAR_results_out/$sample_name"_aligned_out.sam"
+
+#Copying all important STATS file from output to somewhere for reference before running cleanup step
+mv $STAR_results_out/$sample_name"_out"/genome_1_Pass/Log.final.out $STAR_results_out/$sample_name"_Stats_on_Run"/Step_1_Sample_1_Pass_Log.final.out
+mv $STAR_results_out/$sample_name"_out"/genome_1_Pass/Log.progress.out $STAR_results_out/$sample_name"_Stats_on_Run"/Step_1_Sample_1_Pass_Log.progress.out
+mv $STAR_results_out/$sample_name"_out_2nd_pass"/Log.final.out $STAR_results_out/$sample_name"_Stats_on_Run"/Step_1_Sample_2nd_Pass_Log.final.out
+mv $STAR_results_out/$sample_name"_out_2nd_pass"/Log.progress.out $STAR_results_out/$sample_name"_Stats_on_Run"/Step_1_Sample_2nd_Pass_Log.progress.out
+
+#Clean_Up_Stage_of_Step_1_to_Limit_Space_Usage
+#rm -rf $STAR_results_out/$sample_name"_out"
+#rm -rf $STAR_results_out/$sample_name"_out_2nd_pass"
+
+#QC Step of the final file produced from STAR
+samtools flagstat $STAR_results_out/$sample_name"_aligned_out.sam" > $STAR_results_out/$sample_name"_Stats_on_Run"/"Step_1_Final"_$sample_name"_sorted_bam_stats".txt
+
+#End of Step 1 of the GATK Pipeline
+#################################################################################################################################################################
+##############################################################################################################################################################
+
+
+
+####################################Step 2 of GATK Pipeline##########################################################################
+#This step is just re-labeling all the data to a certain read group (aka sample name)--important for VCF file
+#Also this step sorts the file (picard command SO=coordinate)---Follows GATK Pipeline exactly--- No Changes
+
+cd $STAR_results_out
+
+java -jar /home/mjtiv/software/PICARD/PICARD_2.8.1/picard.jar \
+AddOrReplaceReadGroups \
+I=$STAR_results_out/$sample_name"_aligned_out.sam" \
+O=$STAR_results_out/$sample_name"_sorted_RG.bam" \
+SO=coordinate RGID="ID_"$sample_name RGLB=whatever RGPL=$sample_platform RGPU=whatever RGSM=$sample_name
+
+#Creating a file to verify the output of the samples using Samtools
+samtools flagstat $STAR_results_out/$sample_name"_sorted_RG.bam" > $STAR_results_out/Stats_on_Run/"Step_2"_$sample_name"_Part_1_stats".txt
+
+java -jar /home/mjtiv/software/PICARD/PICARD_2.8.1/picard.jar \
+MarkDuplicates \
+I=$STAR_results_out/$sample_name"_sorted_RG.bam" \
+O=$STAR_results_out/$sample_name"_sorted_RG_MD.bam" \
+M=$STAR_results_out/$sample_name"_MD.metrics" CREATE_INDEX=true VALIDATION_STRINGENCY=SILENT
+
+#Clean_Up_Stage_of_Step_2_Part_1_to_Limit_Space_Usage
+#rm $STAR_results_out/$sample_name"_sorted_RG.bam"
+
+#Creating a file to verify the output of the samples using Samtools
+samtools flagstat $STAR_results_out/$sample_name"_sorted_RG_MD.bam" > $STAR_results_out/$sample_name"_Stats_on_Run"/"Step_2"_$sample_name"_Part_2_stats".txt
+
+#End of Step 2 of the GATK Pipeline
+#################################################################################################################################################################
+##############################################################################################################################################################
+
+
+##################################Step 3 of the GATK Pipeline##############################################################
+
+#SplitNCigar Reads helps to fix exon/intron junctions by removing N (unknown bases) and
+#also fixes reads that continue into the intronic region. These types of reads could occur
+#from lowly expressed splice variants that are not of significant importance (somewhat common)
+#No parameters were changed from the GATK Pipeline
+
+java -jar $GATK_Pathway/GenomeAnalysisTK.jar -T SplitNCigarReads \
+-R $genome_directory/Gallus_gallus.Gallus_gallus-5.0.dna.toplevel.fa \
+-I $STAR_results_out/$sample_name"_sorted_RG_MD.bam" \
+-o $STAR_results_out/$sample_name"_sorted_RG_MD_split.bam" \
+-rf ReassignOneMappingQuality -RMQF 255 -RMQT 60 -U ALLOW_N_CIGAR_READS
+
+samtools flagstat $STAR_results_out/$sample_name"_sorted_RG_MD_split.bam" > $STAR_results_out/$sample_name"_Stats_on_Run"/"Step3_"$sample_name"_stats".txt
+
+#Clean_Up_Stage_of_Step_3_to_Limit_Space_Usage
+#rm $STAR_results_out/$sample_name"_sorted_RG_MD.bam"
+
+#End of Step 3 of the GATK Pipeline
+#################################################################################################################################################################
+##############################################################################################################################################################
+
+
+###############################    Step 4 of GATK Pipeline SKIP    ##############################################################
+echo 'Step Indel Realignment is Not Needed' > $STAR_results_out/Stats_on_Run/"Step4_"$sample_name"SKIP".txt
+
+
+###############################Step 5 of GATK Pipeline##############################################################
+#Step 5 Base Recalibration step to save questionable data, two step process. In
+#the first step the base scores are recalibrated for samples not in dbSNP, generating
+#a table of results. The output table (BQSR) is then merged into the data using
+#the PrintReads function in GATK. Note PrintReads can also be used for merging 
+#multiple BAM files
+#GATK website on Base Recalibration (follows all standard parameters): https://software.broadinstitute.org/gatk/gatkdocs/org_broadinstitute_gatk_tools_walkers_bqsr_BaseRecalibrator.php
+#GATK website on Print Reads to merge in BQSR file (follows all standard parameters): http://gatkforums.broadinstitute.org/gatk/discussion/44/base-quality-score-recalibration-bqsr
+
+java -jar $GATK_Pathway/GenomeAnalysisTK.jar \
+-R $genome_directory/Gallus_gallus.Gallus_gallus-5.0.dna.toplevel.fa \
+-T BaseRecalibrator \
+-I $STAR_results_out/$sample_name"_sorted_RG_MD_split.bam" \
+-o $STAR_results_out/$sample_name"_BQSR.recal.grp" \
+-knownSites $genome_directory/sorted_Gallus_gallus.vcf
+
+
+
+
+java -jar $GATK_Pathway/GenomeAnalysisTK.jar \
+-R $genome_directory/Gallus_gallus.Gallus_gallus-5.0.dna.toplevel.fa \
+-T PrintReads \
+-I $STAR_results_out/$sample_name"_sorted_RG_MD_split.bam" \
+-BQSR $STAR_results_out/$sample_name"_BQSR.recal.grp" \
+-o $STAR_results_out/$sample_name"_RG_MD_SP_RA_RC.bam"
+
+samtools flagstat $STAR_results_out/$sample_name"_RG_MD_SP_RA_RC.bam" > $STAR_results_out/$sample_name"_Stats_on_Run"/"Step5_"$sample_name"_RG_MD_SP_RA_RC_stats".txt
+
+#Clean_Up_Stage_of_Step_5_to_Limit_Space_Usage 
+#rm $STAR_results_out/$sample_name"_BQSR.recal.grp"
+
+#End of Step 5 of the GATK Pipeline
+#################################################################################################################################################################
+##############################################################################################################################################################
+
+
+
+###############################Step 6 of GATK Pipeline###########################################################
+#In this step of the data analysis the variants are actually called from the BAM data 
+#using HaplotypeCaller. Note this step has drastically improved in latest GATK upgrade (reduction in error of SNPs called)
+
+
+
+java -jar $GATK_Pathway/GenomeAnalysisTK.jar \
+-T HaplotypeCaller \
+-R $genome_directory/Gallus_gallus.Gallus_gallus-5.0.dna.toplevel.fa \
+-I $STAR_results_out/$sample_name"_RG_MD_SP_RA_RC.bam" \
+--emitRefConfidence GVCF \
+-dontUseSoftClippedBases -stand_call_conf 20.0 -o $STAR_results_out/$sample_name"_output.g.vcf"
+
+#The following command (-stand_emit_conf 20.0 WARNING) was removed from latest GATK version 3.7 
+#Explanation of why command was dropped seen here https://software.broadinstitute.org/gatk/blog?id=8692
+#Commands removed from prior versions used in Weixuan's original pipeline --variant_index_type LINEAR --variant_index_parameter 128000 (link for cohorts explains why dropped)
+#calling variants with cohorts http://gatkforums.broadinstitute.org/gatk/discussion/3893/calling-variants-on-cohorts-of-samples-using-the-haplotypecaller-in-gvcf-mode
+#Important when running samples with multiple BAM files use command (-emitRefConfidence GVCF) and add file extension (.g.vcf)
+
+#Clean_Up_Stage_of_Step_6_Limit_Space_Usage
+#RM $STAR_results_out/$sample_name"_RG_MD_SP_RA_RC.bam"
+
+#End of Step 6 of the GATK Pipeline
+#################################################################################################################################################################
+##############################################################################################################################################################
+
+
+##############################Clean-Up Steps#############################################
+
+#Clean_Up_Stage_of_Step_1_to_Limit_Space_Usage
+rm -rf $STAR_results_out/$sample_name"_out"
+rm -rf $STAR_results_out/$sample_name"_out_2nd_pass"
+
+#Clean_Up_Stage_of_Step_2_Part_1_to_Limit_Space_Usage
+cd $STAR_results_out
+rm $sample_name"_sorted_RG.bam"
+
+#Clean_Up_Stage_of_Step_3_to_Limit_Space_Usage
+cd $STAR_results_out
+rm $sample_name"_sorted_RG_MD.bam"
+
+#Clean_Up_Stage_of_Step_5_to_Limit_Space_Usage 
+cd $STAR_results_out
+rm $sample_name"_BQSR.recal.grp"
+
+#Clean_Up_Stage_of_Step_6_Limit_Space_Usage
+cd $STAR_results_out
+rm $sample_name"_RG_MD_SP_RA_RC.bam"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
